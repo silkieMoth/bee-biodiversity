@@ -11,6 +11,8 @@ library(terra)
 library(sf)
 library(stars)
 library(janitor)
+library(spdep)
+library(spatialreg)
 ```
 
 ```{r}
@@ -22,23 +24,15 @@ county_codes <- read_csv(here::here('data', 'pur2017', 'county.txt')) %>% clean_
 
 # read in pesticide data
 # will probably use PRODNO (product/mix id), CHEM_CODE (active ingredient id), LBS_PRD_USED (pounds pesticide mix used)
-for (i in seq(1,58,1)){
+for (i in list.files(here::here('data', 'pur2017'), pattern = 'udc17_')){
   if (exists('pesticides') == FALSE) { # init empty df
   pesticides <- data.frame()
   }
   
-  if(nchar(i) == 1){ # format file num
-    i = paste0('0', i)
-  }
-  
-  title <- paste0('udc17_', i, '.txt') # format csv name
-  print('reading ', title, '......')
-  csv <- read_csv(here::here('data', 'pur2017', title)) # read in csv
+  loading <- paste0('reading ', i, '......')
+  print(loading)
+  csv <- read_csv(here::here('data', 'pur2017', i), show_col_types = FALSE) # read in csv
   pesticides <- rbind(pesticides, csv) # append to mother df
-}
-
-for (i in list.files(here::here('data', 'pur2017', 'pesticide_data'))){
-  print(i)
 }
 
 # read in bee occurance data
@@ -52,7 +46,7 @@ bees <- read_csv(here::here('data', 'SymbOutput_2024-12-05_131650_DwC-A', 'occur
 
 ```{r}
 # group by county
-townships <- townships %>% 
+counties <- townships %>% 
   clean_names() %>% 
   group_by(county_cd) %>% 
   summarize(geometry = st_union(geometry))
@@ -75,20 +69,153 @@ tm_shape(bees) +
 ```
 
 ```{r}
+# select for rows with ids down to species
 bee_species <- bees %>% 
   filter(taxonRank == 'Species') %>% 
   select('id', 'scientificName')
 
+# get species richness by county
 biodiversity <- st_join(pest_by_county, bee_species) %>% 
   group_by(county_cd) %>% 
   summarize(lbs_prd_used = first(lbs_prd_used), 
-            sp_richness = n_distinct(scientificName)) %>% 
+            sp_richness = n_distinct(scientificName)/n()) %>% 
   inner_join(county_codes)
 ```
 
 ```{r}
-ggplot(biodiversity, aes(lbs_prd_used, sp_richness)) + 
+ggplot(biodiversity, aes(sp_richness, lbs_prd_used)) + 
   geom_point() + 
   geom_smooth(method = lm)
 ```
+## Diagnosing Spatialautocorrelation
+
+```{r}
+# convert lbs pesticide to kg so numbers are small enough to be handled by computer
+biodiversity <- biodiversity %>% mutate(kg_prd_used = lbs_prd_used * 0.45359237)
+
+# get linear model
+biodiv_lm <- lm(kg_prd_used ~ sp_richness, biodiversity)
+
+# attach resids to dataset, might not need this
+biodiversity <- biodiversity %>% mutate(sp_pest_resid = resid(biodiv_lm))
+
+# get centroids of each county polygon
+bio_center <- st_centroid(biodiversity)
+  
+# try and calculate spatial autocorrelation at 50 km
+bee_nb <- dnearneigh(bio_center, d1 = 0, d2 = 100000)
+
+# extract calculate neighbors for point 1
+pol_1_neigh <- biodiversity[bee_nb[[1]], 1:length(biodiversity)]
+```
+
+```{r}
+tm_shape(pest_by_county) + 
+  tm_borders() +
+tm_shape(pol_1_neigh) + 
+  tm_polygons(col = 'black')
+```
+
+
+```{r}
+
+# assign weights to each neighboring object
+# W = 1/# of neighbors
+# zero policy allows listing of objects with zero neighbors
+bee_lw <- nb2listw(bee_nb, style = 'W', zero.policy = TRUE)
+
+# get moran I
+# we must pass a dataset with called column
+# listw = weights list from nb2listw
+# n = total features with at least 1 neighbor
+# S0 = sum of all weights
+bee_resid_moran <- moran(biodiversity$sp_pest_resid, listw = bee_lw, n = length(bee_nb), S0 = Szero(bee_lw))
+
+# run 999 simulations
+bee_mc <- moran.mc(biodiversity$sp_pest_resid, bee_lw, nsim = 999)
+
+# running a lag model
+lag_mod <- lag.listw(bee_lw, biodiversity$sp_pest_resid)
+
+# making lag model table
+lag_mod_tib <- tibble(resids = biodiversity$sp_pest_resid, neighborhood = lag_mod)
+
+# lag mod lm
+lm(neighborhood ~ resids, data = lag_mod_tib)
+```
+
+
+```{r}
+tibble(moran = bee_mc$res) %>% 
+  ggplot(aes(x = moran)) + 
+  geom_freqpoly(lwd = 1.5) + 
+  geom_vline(xintercept = bee_resid_moran$I)
+```
+
+```{r}
+ggplot(lag_mod_tib, aes(resids, neighborhood)) + 
+  geom_point() + 
+  geom_smooth(method = lm)
+```
+
+
+conclusion: there might be spatial autocorrelation
+
+
+Get error model to account for spatialautocorrelation
+```{r}
+
+bio_err <- errorsarlm(sp_richness ~ kg_prd_used, 
+            data = biodiversity,
+            listw = bee_lw,
+            na.action = na.exclude, 
+            zero.policy = TRUE)
+
+summary(bio_err)
+```
+
+```{r}
+# add model and model residuals column to lag tibble
+lag_mod_tib <- lag_mod_tib %>% add_column(error_mod = fitted(bio_err), error_resid = resid(bio_err))
+
+# running a lag model with the error model
+lag_mod_err <- lag.listw(bee_lw, lag_mod_tib$error_resid)
+
+# get moran I for error model
+err_moran <- moran(lag_mod_tib$error_resid, listw = bee_lw, n = length(bee_nb), S0 = Szero(bee_lw))
+
+# run simulation with error model
+resid_mc <- moran.mc(lag_mod_tib$error_resid, bee_lw, nsim = 999)
+
+```
+
+```{r}
+tibble(moran = resid_mc$res) %>% 
+  ggplot(aes(x = moran)) + 
+  geom_histogram() + 
+  geom_vline(xintercept = err_moran$I)
+```
+
+```{r}
+# add lag for error to tibble
+lag_mod_tib <- lag_mod_tib %>% add_column(neighborhood_err = lag_mod_err)
+
+ggplot(lag_mod_tib, aes(error_resid, neighborhood_err)) + 
+  geom_point() + 
+  geom_smooth(method = lm)
+```
+
+by using an error model, we resolve the autospatial correlation
+```{r}
+# attach error model to variable df
+if (!'error_mod' %in% names(biodiversity)){
+  biodiversity <- biodiversity %>% add_column(error_mod = fitted(bio_err))
+}
+
+# plot error model variables
+ggplot(biodiversity, aes(x = kg_prd_used, y = sp_richness)) + 
+  geom_point() + 
+  geom_abline(intercept = coef(bio_err)[2], slope = coef(bio_err)[3])
+```
+
 
