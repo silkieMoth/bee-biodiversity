@@ -1,0 +1,94 @@
+---
+title: "sandbox"
+format: html
+editor: source
+---
+
+```{r}
+library(tidyverse)
+library(tmap)
+library(terra)
+library(sf)
+library(stars)
+library(janitor)
+```
+
+```{r}
+# read in ca shapefile
+townships <- st_read(here::here('data', 'Statewide_CA_PLSS_NAD83AlbersCA_20240718', 'Statewide_CA_PLSS_NAD83AlbersCA_20240718.shp'))
+
+# read in county code csv
+county_codes <- read_csv(here::here('data', 'pur2017', 'county.txt')) %>% clean_names(replace = c('couty_name' = 'county_name')) %>% lapply(tolower) %>% as_data_frame()
+
+# read in pesticide data
+# will probably use PRODNO (product/mix id), CHEM_CODE (active ingredient id), LBS_PRD_USED (pounds pesticide mix used)
+for (i in seq(1,58,1)){
+  if (exists('pesticides') == FALSE) { # init empty df
+  pesticides <- data.frame()
+  }
+  
+  if(nchar(i) == 1){ # format file num
+    i = paste0('0', i)
+  }
+  
+  title <- paste0('udc17_', i, '.txt') # format csv name
+  print('reading ', title, '......')
+  csv <- read_csv(here::here('data', 'pur2017', title)) # read in csv
+  pesticides <- rbind(pesticides, csv) # append to mother df
+}
+
+for (i in list.files(here::here('data', 'pur2017', 'pesticide_data'))){
+  print(i)
+}
+
+# read in bee occurance data
+bees <- read_csv(here::here('data', 'SymbOutput_2024-12-05_131650_DwC-A', 'occurrences.csv')) %>%
+  drop_na('decimalLatitude', 'decimalLongitude') %>% 
+  st_as_sf(coords = c('decimalLongitude', 'decimalLatitude')) %>% 
+  st_set_crs('epsg:4326') %>% 
+  st_transform(st_crs(townships))
+```
+
+
+```{r}
+# group by county
+townships <- townships %>% 
+  clean_names() %>% 
+  group_by(county_cd) %>% 
+  summarize(geometry = st_union(geometry))
+
+# get pesticide sum by county
+pesticides_sum <- pesticides %>% 
+  select(lbs_prd_used, county_cd) %>% 
+  group_by(county_cd) %>% 
+  summarize(lbs_prd_used = sum(lbs_prd_used, na.rm = TRUE))
+
+# join by county
+pest_by_county <- left_join(townships, pesticides_sum, by = join_by(county_cd))
+```
+
+```{r}
+tm_shape(pest_by_county) + 
+  tm_polygons(col = 'lbs_prd_used') + 
+tm_shape(bees) + 
+  tm_dots()
+```
+
+```{r}
+bee_species <- bees %>% 
+  filter(taxonRank == 'Species') %>% 
+  select('id', 'scientificName')
+
+biodiversity <- st_join(pest_by_county, bee_species) %>% 
+  group_by(county_cd) %>% 
+  summarize(lbs_prd_used = first(lbs_prd_used), 
+            sp_richness = n_distinct(scientificName)) %>% 
+  inner_join(county_codes)
+```
+
+```{r}
+ggplot(biodiversity, aes(lbs_prd_used, sp_richness)) + 
+  geom_point() + 
+  geom_smooth(method = lm)
+```
+
