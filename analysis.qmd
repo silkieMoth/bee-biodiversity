@@ -13,14 +13,22 @@ library(stars)
 library(janitor)
 library(spdep)
 library(spatialreg)
+library(readxl)
 ```
 
 ```{r}
 # read in ca shapefile
-townships <- st_read(here::here('data', 'Statewide_CA_PLSS_NAD83AlbersCA_20240718', 'Statewide_CA_PLSS_NAD83AlbersCA_20240718.shp'))
+townships <- st_read(here::here('data', 'Statewide_CA_PLSS_NAD83AlbersCA_20240718', 'Statewide_CA_PLSS_NAD83AlbersCA_20240718.shp')) %>% clean_names()
 
 # read in county code csv
 county_codes <- read_csv(here::here('data', 'pur2017', 'county.txt')) %>% clean_names(replace = c('couty_name' = 'county_name')) %>% lapply(tolower) %>% as_data_frame()
+county_codes$county_name <- county_codes$county_name %>% make_clean_names()
+
+# read and transform population density data
+pop <- read_excel(here::here('data', 'co-est2023-pop-06.xlsx'), range = 'A5:F63')
+names(pop) <- c('county_name', 'april_1_estimates', '2020', '2021', '2022', '2023')
+pop$county_name <- pop$county_name %>% stringr::str_remove(., ' County, California') %>% stringr::str_remove(., '.') %>% make_clean_names()
+pop <- pop %>% inner_join(county_codes, by = join_by(county_name))
 
 # read in pesticide data
 # will probably use PRODNO (product/mix id), CHEM_CODE (active ingredient id), LBS_PRD_USED (pounds pesticide mix used)
@@ -45,11 +53,12 @@ bees <- read_csv(here::here('data', 'SymbOutput_2024-12-05_131650_DwC-A', 'occur
 
 
 ```{r}
-# group by county
+# group by county and join population
 counties <- townships %>% 
   clean_names() %>% 
   group_by(county_cd) %>% 
-  summarize(geometry = st_union(geometry))
+  summarize(geometry = st_union(geometry)) %>% 
+  inner_join(pop, by = join_by('county_cd'))
 
 # get pesticide sum by county
 pesticides_sum <- pesticides %>% 
@@ -58,14 +67,19 @@ pesticides_sum <- pesticides %>%
   summarize(lbs_prd_used = sum(lbs_prd_used, na.rm = TRUE))
 
 # join by county
-pest_by_county <- left_join(townships, pesticides_sum, by = join_by(county_cd))
+pest_by_county <- left_join(townships, pesticides_sum, by = join_by(county_cd)) %>% inner_join(pop, join_by(county_cd))
 ```
 
 ```{r}
-tm_shape(pest_by_county) + 
-  tm_polygons(col = 'lbs_prd_used') + 
+map <- tm_shape(pest_by_county) + 
+  tm_polygons(col = 'lbs_prd_used', title = 'Product Used (mil lbs)') + 
 tm_shape(bees) + 
-  tm_dots()
+  tm_dots() + 
+  tm_layout(legend.format = c(fun = function(x) stringr::str_remove(x, 'mlm'))) + 
+  tm_compass(position = c('left', 'bottom'), type = '4star', size = 3) +
+  tm_scale_bar(position = c('left', 'bottom'))
+
+tmap_save(map, here::here('figs', 'bee_pesticide_map.png'), width = 4.7, height = 7, asp = 0)
 ```
 
 ```{r}
@@ -76,16 +90,21 @@ bee_species <- bees %>%
 
 # get species richness by county
 biodiversity <- st_join(pest_by_county, bee_species) %>% 
-  group_by(county_cd) %>% 
+  group_by(county_name) %>% 
   summarize(lbs_prd_used = first(lbs_prd_used), 
-            sp_richness = n_distinct(scientificName)/n()) %>% 
-  inner_join(county_codes)
+            sp_richness = n_distinct(scientificName)/n())
 ```
 
 ```{r}
-ggplot(biodiversity, aes(sp_richness, lbs_prd_used)) + 
+ggplot(biodiversity, aes(lbs_prd_used, sp_richness)) + 
   geom_point() + 
-  geom_smooth(method = lm)
+  geom_smooth(method = lm) + 
+  labs(x = 'Product Used (lbs)',
+       y = 'Species Richness Normalized by Sample Size',
+       title = 'Effect of Pesticide Application on Anthophila Richness') + 
+  theme_minimal()
+
+ggsave(here::here('figs', 'initial_plot.png'), width = 7, height = 4)
 ```
 ## Diagnosing Spatialautocorrelation
 
@@ -94,9 +113,9 @@ ggplot(biodiversity, aes(sp_richness, lbs_prd_used)) +
 biodiversity <- biodiversity %>% mutate(kg_prd_used = lbs_prd_used * 0.45359237)
 
 # get linear model
-biodiv_lm <- lm(kg_prd_used ~ sp_richness, biodiversity)
+biodiv_lm <- lm(sp_richness ~ kg_prd_used, biodiversity)
 
-# attach resids to dataset, might not need this
+# attach resids to dataset
 biodiversity <- biodiversity %>% mutate(sp_pest_resid = resid(biodiv_lm))
 
 # get centroids of each county polygon
@@ -104,16 +123,6 @@ bio_center <- st_centroid(biodiversity)
   
 # try and calculate spatial autocorrelation at 50 km
 bee_nb <- dnearneigh(bio_center, d1 = 0, d2 = 100000)
-
-# extract calculate neighbors for point 1
-pol_1_neigh <- biodiversity[bee_nb[[1]], 1:length(biodiversity)]
-```
-
-```{r}
-tm_shape(pest_by_county) + 
-  tm_borders() +
-tm_shape(pol_1_neigh) + 
-  tm_polygons(col = 'black')
 ```
 
 
@@ -129,7 +138,10 @@ bee_lw <- nb2listw(bee_nb, style = 'W', zero.policy = TRUE)
 # listw = weights list from nb2listw
 # n = total features with at least 1 neighbor
 # S0 = sum of all weights
-bee_resid_moran <- moran(biodiversity$sp_pest_resid, listw = bee_lw, n = length(bee_nb), S0 = Szero(bee_lw))
+bee_resid_moran <- moran(biodiversity$sp_pest_resid, 
+                         listw = bee_lw, 
+                         n = length(bee_nb), 
+                         S0 = Szero(bee_lw))
 
 # run 999 simulations
 bee_mc <- moran.mc(biodiversity$sp_pest_resid, bee_lw, nsim = 999)
@@ -141,7 +153,7 @@ lag_mod <- lag.listw(bee_lw, biodiversity$sp_pest_resid)
 lag_mod_tib <- tibble(resids = biodiversity$sp_pest_resid, neighborhood = lag_mod)
 
 # lag mod lm
-lm(neighborhood ~ resids, data = lag_mod_tib)
+lag_lm <- lm(neighborhood ~ resids, data = lag_mod_tib)
 ```
 
 
@@ -149,13 +161,31 @@ lm(neighborhood ~ resids, data = lag_mod_tib)
 tibble(moran = bee_mc$res) %>% 
   ggplot(aes(x = moran)) + 
   geom_freqpoly(lwd = 1.5) + 
-  geom_vline(xintercept = bee_resid_moran$I)
+  geom_vline(xintercept = bee_resid_moran$I, 
+             color = 'red', 
+             linewidth = 2.5) + 
+  labs(x = "Moran's I",
+       y = 'Frequency') + 
+  theme_minimal()
+
+ggsave(here::here('figs', 'moran_bad.png'), width = 7, height = 4)
 ```
 
 ```{r}
 ggplot(lag_mod_tib, aes(resids, neighborhood)) + 
   geom_point() + 
-  geom_smooth(method = lm)
+  geom_smooth(method = lm) + 
+  labs(x = 'Residuals', 
+       y = 'Spatial Neighborhood') + 
+  geom_text(aes(x=0.5, y=0.38, label = paste0('r', common::supsc("2"), ' = ', summary(lag_lm)$adj.r.squared)),
+           color="darkred", 
+           size=4.5, fontface="italic") +
+  geom_text(aes(x=0.5, y=0.35, label = paste0('p = ', summary(lag_lm)$coefficients[2,4])),
+           color="darkred", 
+           size=4.5, fontface="italic") +
+  theme_minimal()
+
+ggsave(here::here('figs', 'resids_bad.png'), width = 7, height = 4)
 ```
 
 
@@ -193,29 +223,189 @@ resid_mc <- moran.mc(lag_mod_tib$error_resid, bee_lw, nsim = 999)
 tibble(moran = resid_mc$res) %>% 
   ggplot(aes(x = moran)) + 
   geom_histogram() + 
-  geom_vline(xintercept = err_moran$I)
+  geom_vline(xintercept = err_moran$I, 
+             color = 'green3', 
+             linewidth = 2.5) + 
+  labs(x = "Moran's I",
+       y = 'Frequency') + 
+  theme_minimal()
+
+ggsave(here::here('figs', 'moran_good.png'), width = 7, height = 4)
 ```
 
 ```{r}
 # add lag for error to tibble
 lag_mod_tib <- lag_mod_tib %>% add_column(neighborhood_err = lag_mod_err)
 
+# run an lm to get p for errors neighborhood ~ resid
+err_res_lm <- lm(lag_mod_tib$neighborhood_err ~ lag_mod_tib$error_resid)
+
 ggplot(lag_mod_tib, aes(error_resid, neighborhood_err)) + 
   geom_point() + 
-  geom_smooth(method = lm)
+  geom_smooth(method = lm) + 
+  labs(x = 'Residuals', 
+       y = 'Spatial Neighborhood') + 
+  geom_text(aes(x=0.5, y=0.3, label = paste0('r', common::supsc("2"), ' = ', summary(err_res_lm)$adj.r.squared)),
+           color="turquoise3", 
+           size=4.5, fontface="italic") +
+  geom_text(aes(x=0.5, y=0.27, label = paste0('p = ', summary(err_res_lm)$coefficients[2,4])),
+           color="turquoise3", 
+           size=4.5, fontface="italic") +
+  theme_minimal()
+
+ggsave(here::here('figs', 'resids_good.png'), width = 7, height = 4)
 ```
 
 by using an error model, we resolve the autospatial correlation
+```{r}
+# plot error model variables
+ggplot(biodiversity, aes(x = kg_prd_used, y = sp_richness)) + 
+  geom_abline(intercept = coef(bio_err)[2], 
+              slope = coef(bio_err)[3], 
+              linewidth = 2, 
+              color = 'darkred') + 
+  geom_point() +
+  labs(x = 'Product Used (kg)',
+       y = 'Species Richness Normalized by Sample Size',
+       title = 'Effect of Pesticide Application on Anthophila Richness') + 
+  geom_text(aes(x=1.8e+7, y=0.75, 
+                label = paste0('pseudo-r', common::supsc("2"), 
+                               ' = ', 
+                               '???')),
+           color="darkred", 
+           size=4.5, fontface="italic") +
+  geom_text(aes(x=1.8e+7, y=0.7, 
+                label = paste0('p = ', 
+                               summary(bio_err)$Coef[2,4])),
+           color="darkred", 
+           size=4.5, fontface="italic") +
+  theme_minimal()
+
+ggsave(here::here('figs', 'final_fig.png'), width = 6, height = 4)
+```
+
+
+# work with pop density data
+```{r}
+# join population data
+biodiversity <- biodiversity %>% inner_join(pop, by = join_by(county_name)) %>% select(1:6, 11:12) %>% rename(biodiversity, tot_pop = '2023')
+
+biodiversity <- biodiversity %>% mutate(area = st_area(biodiversity))
+
+biodiversity <- biodiversity %>% mutate(pop_density = as.numeric(area/tot_pop))
+
+biodiversity <- biodiversity %>% mutate(less_than = ifelse(pop_density < 150000, 'Low Density', 'High Density'))
+
+temp_lm <- lm(sp_richness ~ kg_prd_used + less_than, biodiversity)
+
+ggplot(biodiversity, aes(x = less_than, y = sp_richness)) + 
+  geom_col() + 
+  labs(x = 'Population less than 200000', 
+       y = 'Species Richness Normalized by Sample Size',
+       title = 'Biodiversity by Population Density')
+
+ggsave(here::here('figs', 'draft.png'), width = 6, height = 4)
+```
+
+
+
+
+
+# experimental zone
 ```{r}
 # attach error model to variable df
 if (!'error_mod' %in% names(biodiversity)){
   biodiversity <- biodiversity %>% add_column(error_mod = fitted(bio_err))
 }
 
-# plot error model variables
-ggplot(biodiversity, aes(x = kg_prd_used, y = sp_richness)) + 
-  geom_point() + 
-  geom_abline(intercept = coef(bio_err)[2], slope = coef(bio_err)[3])
+# get pseudo r squared for the error model
+err_pseudo_r2 <- cor(null_lm, bio_err)^2
+
+
+# null distribution maker
+null_dist_maker <- function(){
+null_dist_rich <- replicate(1000, {
+  rand_rich <- mean(runif(58, min(biodiversity$sp_richness), max(biodiversity$sp_richness)))
+})
+null_dist_pest <- replicate(1000, {
+  rand_pest <- mean(runif(58, min(biodiversity$kg_prd_used), max(biodiversity$kg_prd_used)))
+})
+x <- data.frame(null_rich = null_dist_rich, null_pest = null_dist_pest)
+
+return(x)
+}
+
+null_dist <- null_dist_maker()
+null_lm <- lm(null_rich ~ null_pest, null_dist)
+
+#test <- 1 - (ln(fitted(bio_err))/ln(fitted(null_lm)))
+
+# will finish this later
+null_dist_maker_v2 <- function(){
+null_dist_rich <- replicate(1000, {
+  run <- bee_species %>% 
+    mutate(species = sample(scientificName, n())) %>%
+    st_join(pest_by_county, bee_species) %>% 
+  group_by(county_cd) %>% 
+  summarize(sp_richness = n_distinct(scientificName)/n())
+  
+  var <- var(run$sp_richness)
+})
+null_dist_pest <- replicate(1000, {
+  rand_pest <- mean(runif(58, min(biodiversity$kg_prd_used), max(biodiversity$kg_prd_used)))
+  run <- bee_species %>% 
+    mutate(pesticides = sample(scientificName, n())) %>%
+    st_join(pest_by_county, bee_species) %>% 
+  group_by(county_cd) %>% 
+  summarize(sp_richness = n_distinct(scientificName)/n())
+  
+  var <- var(run$sp_richness)
+})
+x <- data.frame(null_rich = null_dist_rich, null_pest = null_dist_pest)
+
+return(x)
+}
+
 ```
+
+
+```{r}
+ggplot(null_dist, aes(x = null_pest, y = null_rich)) + 
+  geom_point() + 
+  geom_smooth(method = lm)
+```
+
+There may not be a significant correlation between biodiversity and pesticide use, but we can do a confidence test anyway
+
+1. Define hypothesis
+HO = there is no significant coorelation between biodiversity and pesticide use
+Ha = there is a significant coorelation
+
+2. get t stat
+amount of variance between counties
+
+```{r}
+t_st <- summary(bio_err)$Coef[2,3]
+```
+
+3. Get random dist and plot with t stat
+```{r}
+null_dist <- null_dist_maker()
+null_lm <- errorsarlm(null_rich ~ null_pest, 
+            data = null,
+            listw = bee_lw,
+            na.action = na.exclude, 
+            zero.policy = TRUE)
+
+null_fitted <- null_dist %>% mutate(fitted = fitted(null_lm),
+                                    predict = predict(null_lm))
+
+ggplot((null_fitted), aes(x = fitted)) + 
+  geom_histogram(bins = 500) + 
+  geom_vline(xintercept = t_st)
+```
+
+
+
 
 
