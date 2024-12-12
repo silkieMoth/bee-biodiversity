@@ -53,12 +53,17 @@ bees <- read_csv(here::here('data', 'SymbOutput_2024-12-05_131650_DwC-A', 'occur
 
 
 ```{r}
+# average population from 2020 to 2023
+pop_mean <- pop %>% 
+  mutate(mean = rowMeans(across(3:6))) %>% 
+  select(county_name, county_cd, mean)
+
 # group by county and join population
 counties <- townships %>% 
   clean_names() %>% 
   group_by(county_cd) %>% 
   summarize(geometry = st_union(geometry)) %>% 
-  inner_join(pop, by = join_by('county_cd'))
+  inner_join(pop_mean, by = join_by('county_cd'))
 
 # get pesticide sum by county
 pesticides_sum <- pesticides %>% 
@@ -67,7 +72,7 @@ pesticides_sum <- pesticides %>%
   summarize(lbs_prd_used = sum(lbs_prd_used, na.rm = TRUE))
 
 # join by county
-pest_by_county <- left_join(townships, pesticides_sum, by = join_by(county_cd)) %>% inner_join(pop, join_by(county_cd))
+pest_by_county <- left_join(counties, pesticides_sum, by = join_by(county_cd))
 ```
 
 ```{r}
@@ -288,23 +293,31 @@ ggsave(here::here('figs', 'final_fig.png'), width = 6, height = 4)
 # work with pop density data
 ```{r}
 # join population data
-biodiversity <- biodiversity %>% inner_join(pop, by = join_by(county_name)) %>% select(1:6, 11:12) %>% rename(biodiversity, tot_pop = '2023')
+biodiversity_w_pop <- biodiversity %>% inner_join(pop_mean, by = join_by(county_name)) %>% rename(pop_mean = 'mean')
 
-biodiversity <- biodiversity %>% mutate(area = st_area(biodiversity))
+biodiversity_w_pop <- biodiversity_w_pop %>% mutate(area = st_area(biodiversity_w_pop))
 
-biodiversity <- biodiversity %>% mutate(pop_density = as.numeric(area/tot_pop))
+biodiversity_w_pop <- biodiversity_w_pop %>% mutate(pop_density = as.numeric(pop_mean/area))
 
-biodiversity <- biodiversity %>% mutate(less_than = ifelse(pop_density < 150000, 'Low Density', 'High Density'))
+# biodiversity <- biodiversity %>% mutate(less_than = ifelse(pop_density < 150000, 'Low Density', 'High Density'))
 
-temp_lm <- lm(sp_richness ~ kg_prd_used + less_than, biodiversity)
+temp_lm <- lm(sp_richness ~ kg_prd_used + pop_density, biodiversity_w_pop)
 
-ggplot(biodiversity, aes(x = less_than, y = sp_richness)) + 
-  geom_col() + 
-  labs(x = 'Population less than 200000', 
-       y = 'Species Richness Normalized by Sample Size',
-       title = 'Biodiversity by Population Density')
+expand_grid(sp_richness = seq(min(biodiversity_w_pop$sp_richness), max(biodiversity_w_pop$sp_richness), length.out = nrow(biodiversity_w_pop)),
+            kg_prd_used = seq(min(biodiversity_w_pop$kg_prd_used), max(biodiversity_w_pop$kg_prd_used), length.out = nrow(biodiversity_w_pop)),
+            pop_density = c(summary(biodiversity_w_pop$pop_density)[1], summary(biodiversity_w_pop$pop_density)[2], summary(biodiversity_w_pop$pop_density)[3], summary(biodiversity_w_pop$pop_density)[5], summary(biodiversity_w_pop$pop_density)[6])) %>% 
+mutate(p = predict(temp_lm,
+            newdata = .,
+            type = 'response')) %>%
+ggplot(aes(x = kg_prd_used, y = p, color = as.factor(pop_density))) + 
+  geom_line() + 
+  labs(x = 'Pesticide Product Used (kg)', 
+       y = 'Biodiversity Probability',
+       title = 'Probability of Biodiversity by Pesticide Use and Population Density',
+       color = "Population Density") + 
+   scale_color_manual(labels = c('Min', 'Q1', "Median", 'Q3', 'Max'), values = viridisLite::mako(5, end = 0.85))
 
-ggsave(here::here('figs', 'draft.png'), width = 6, height = 4)
+ggsave(here::here('figs', 'pop_density.png'), width = 6, height = 4)
 ```
 
 
