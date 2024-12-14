@@ -49,6 +49,18 @@ bees <- read_csv(here::here('data', 'SymbOutput_2024-12-05_131650_DwC-A', 'occur
   st_as_sf(coords = c('decimalLongitude', 'decimalLatitude')) %>% 
   st_set_crs('epsg:4326') %>% 
   st_transform(st_crs(townships))
+
+# read habitat frag shapefile
+hab_frag <- st_read(here::here('data','data0', 'wwf_ecos_hab_frag.shp')) %>% 
+  st_make_valid() %>% 
+  st_transform(st_crs(townships))
+
+land_cover <- terra::rast(here::here('data', 'Annual_NLCD_LndCov_2023_CU_C1V0.tif'))
+
+land_cover_stars <- read_stars(here::here('data', 'Annual_NLCD_LndCov_2023_CU_C1V0.tif'))
+
+rm(csv, loading)
+
 ```
 
 
@@ -73,6 +85,8 @@ pesticides_sum <- pesticides %>%
 
 # join by county
 pest_by_county <- left_join(counties, pesticides_sum, by = join_by(county_cd))
+
+rm(pop, townships, pesticides)
 ```
 
 ```{r}
@@ -93,12 +107,46 @@ bee_species <- bees %>%
   filter(taxonRank == 'Species') %>% 
   select('id', 'scientificName')
 
-# get species richness by county
+counties_9001 <- counties %>% st_transform(st_crs(land_cover))
+
+land_cover_stars <- land_cover_stars %>% st_crop(counties_9001) %>% setNames('habitat') #%>% mutate(habitat = case_when(habitat %in% c(11, 12, 21, 22, 23, 24, 31) ~ 0, 
+#                               habitat %in% c(41, 42, 43, 52, 71, 81, 82, 90, 95) ~ 1,
+#                               habitat == 250 ~ NA))
+
+#land_cover <- land_cover %>% terra::crop(counties_9001) %>% setNames('land_use') %>% lapp(., fun = function(habitat){ case_when(habitat %in% c(11, 12, 21, 22, 23, 24, 31) ~ 0, 
+#                               habitat %in% c(41, 42, 43, 52, 71, 81, 82, 90, 95) ~ 1,
+#                               habitat == 250 ~ NA)})
+
+
+bee_species_9001 <- bee_species %>% st_transform(st_crs(land_cover)) %>% st_extract(land_cover_stars, .) %>% mutate(habitat = case_when(habitat %in% c(11, 12, 21, 22, 23, 24, 31) ~ 0, 
+                                                                                                                                        habitat %in% c(41, 42, 43, 52, 71, 81, 82, 90, 95) ~ 1, 
+                                                                                                                                        habitat == 250 ~ NA))
+
+#bee_species_9001 <- bee_species %>% st_transform(st_crs(land_cover)) %>% terra::extract(land_cover, ., bind = TRUE) %>% st_as_sf()
+
+bee_species_extract <- bee_species_9001 %>% st_transform(st_crs(counties)) %>% st_join(bee_species, join = st_nearest_feature) %>% drop_na()
+
+bee_species <- bee_species_extract
+
+
+
+#land_cover_ca_agg <- land_cover %>% terra::crop(counties_9001) %>% terra::aggregate(fact = 10, fun = max) %>% terra::mask(counties_9001) %>% project(crs(counties))
+
+#land_cover_ca <- land_cover %>% terra::crop(counties_9001) %>% terra::aggregate(fact = 4, fun = 'mean') %>% terra::mask(counties_9001) %>% project(crs(counties))
+
+#bee_species_land_use <- land_cover_ca %>% extract(bee_species, ID = FALSE, bind = TRUE) %>% st_as_sf() %>% drop_na() %>% rename(land_use = Annual_NLCD_LndCov_2023_CU_C1V0)
+
+# get species richness, land use by county
 biodiversity <- st_join(pest_by_county, bee_species) %>% 
   group_by(county_name) %>% 
   summarize(lbs_prd_used = first(lbs_prd_used), 
-            sp_richness = n_distinct(scientificName)/n())
+            sp_richness = n_distinct(scientificName)/n(),
+            land_use = round_half_up(mean(habitat)))
+
+#biodiversity$land_use <- round_half_up(biodiversity$land_use) %>% case_match(., c(-99999:11.5) ~ 11, c(11.5:16.5) ~ 12, c(16.5:21.5) ~ 21, c(21.5:22.5) ~ 22, c(22.5:23.5) ~ 23, c(23.5:27.5) ~ 24, c(27.5:36) ~ 31, c(36:41.5) ~ 41, c(41.5:42.5) ~ 42, c(42.5:47.5) ~ 43, c(47.5:61.5) ~ 52, c(61.5:76) ~ 71, c(76:81.5) ~ 81, c(81.5:86) ~ 82, c(86:92.5) ~ 90, c(92.5:105) ~ 95, c(105:99999) ~ NA, .default = .)
+
 ```
+
 
 ```{r}
 ggplot(biodiversity, aes(lbs_prd_used, sp_richness)) + 
@@ -240,11 +288,15 @@ ggsave(here::here('figs', 'moran_good.png'), width = 7, height = 4)
 
 ```{r}
 # add lag for error to tibble
+if ('neighborhood_err' %in% names(lag_mod_tib) == FALSE){
 lag_mod_tib <- lag_mod_tib %>% add_column(neighborhood_err = lag_mod_err)
+}
 
 # run an lm to get p for errors neighborhood ~ resid
 err_res_lm <- lm(lag_mod_tib$neighborhood_err ~ lag_mod_tib$error_resid)
+```
 
+```{r}
 ggplot(lag_mod_tib, aes(error_resid, neighborhood_err)) + 
   geom_point() + 
   geom_smooth(method = lm) + 
@@ -292,20 +344,28 @@ ggsave(here::here('figs', 'final_fig.png'), width = 6, height = 4)
 
 # work with pop density data
 ```{r}
+if ('pop_mean' %in% names(biodiversity) == FALSE){
 # join population data
-biodiversity_w_pop <- biodiversity %>% inner_join(pop_mean, by = join_by(county_name)) %>% rename(pop_mean = 'mean')
+biodiversity <- biodiversity %>% inner_join(pop_mean, by = join_by(county_name)) %>% rename(pop_mean = 'mean')
 
-biodiversity_w_pop <- biodiversity_w_pop %>% mutate(area = st_area(biodiversity_w_pop))
+biodiversity <- biodiversity %>% mutate(area = st_area(biodiversity))
+units(biodiversity$area) <- 'km^2'
 
-biodiversity_w_pop <- biodiversity_w_pop %>% mutate(pop_density = as.numeric(pop_mean/area))
+biodiversity <- biodiversity %>% mutate(pop_density = as.numeric(pop_mean/area))
+}
 
 # biodiversity <- biodiversity %>% mutate(less_than = ifelse(pop_density < 150000, 'Low Density', 'High Density'))
+```
 
-temp_lm <- lm(sp_richness ~ kg_prd_used + pop_density, biodiversity_w_pop)
+```{r}
+temp_lm <- lm(sp_richness ~ kg_prd_used + pop_density, biodiversity)
+```
 
-expand_grid(sp_richness = seq(min(biodiversity_w_pop$sp_richness), max(biodiversity_w_pop$sp_richness), length.out = nrow(biodiversity_w_pop)),
-            kg_prd_used = seq(min(biodiversity_w_pop$kg_prd_used), max(biodiversity_w_pop$kg_prd_used), length.out = nrow(biodiversity_w_pop)),
-            pop_density = c(summary(biodiversity_w_pop$pop_density)[1], summary(biodiversity_w_pop$pop_density)[2], summary(biodiversity_w_pop$pop_density)[3], summary(biodiversity_w_pop$pop_density)[5], summary(biodiversity_w_pop$pop_density)[6])) %>% 
+```{r}
+
+expand_grid(sp_richness = seq(min(biodiversity$sp_richness), max(biodiversity$sp_richness), length.out = nrow(biodiversity)),
+            kg_prd_used = seq(min(biodiversity$kg_prd_used), max(biodiversity$kg_prd_used), length.out = nrow(biodiversity)),
+            pop_density = c(summary(biodiversity$pop_density)[1], summary(biodiversity$pop_density)[2], summary(biodiversity$pop_density)[3], summary(biodiversity$pop_density)[5], summary(biodiversity$pop_density)[6])) %>% 
 mutate(p = predict(temp_lm,
             newdata = .,
             type = 'response')) %>%
@@ -319,6 +379,45 @@ ggplot(aes(x = kg_prd_used, y = p, color = as.factor(pop_density))) +
 
 ggsave(here::here('figs', 'pop_density.png'), width = 6, height = 4)
 ```
+
+
+```{r}
+ggplot(biodiversity, aes(kg_prd_used, pop_density)) + 
+  geom_point() + 
+  geom_smooth(method = lm)
+```
+
+```{r}
+if ('habitat_frag' %in% names(biodiversity) == FALSE){
+hab_frag_ca <- hab_frag %>% st_intersection(counties)
+biodiversity_temp <- biodiversity
+biodiversity <- biodiversity %>% st_join(select(.data = hab_frag_ca, fragmntndx)) %>% group_by(county_name) %>% summarize(habitat_frag = mean(fragmntndx)) %>% st_drop_geometry() %>% inner_join(biodiversity_temp, .)
+}
+```
+
+```{r}
+tm_shape(biodiversity) + 
+  tm_polygons(col = 'habitat_frag')
+```
+
+```{r}
+# new lm with all variables
+pop_n_frag_lm <- lm(sp_richness ~ kg_prd_used + pop_density + habitat_frag + land_use, biodiversity)
+
+summary(pop_n_frag_lm)
+```
+
+
+seeing which variables correlate
+```{r}
+summary(lm(sp_richness ~ kg_prd_used + habitat_frag, biodiversity))
+summary(lm(sp_richness ~ kg_prd_used + pop_density, biodiversity))
+summary(lm(sp_richness ~ kg_prd_used + land_use, biodiversity))
+
+summary(lm(habitat_frag ~ land_use, biodiversity))
+```
+
+
 
 
 
