@@ -14,6 +14,7 @@ library(janitor)
 library(spdep)
 library(spatialreg)
 library(readxl)
+library(patchwork)
 ```
 
 ```{r}
@@ -211,7 +212,7 @@ lag_lm <- lm(neighborhood ~ resids, data = lag_mod_tib)
 
 
 ```{r}
-tibble(moran = bee_mc$res) %>% 
+moran_bad <- tibble(moran = bee_mc$res) %>% 
   ggplot(aes(x = moran)) + 
   geom_freqpoly(lwd = 1.5) + 
   geom_vline(xintercept = bee_resid_moran$I, 
@@ -225,17 +226,17 @@ ggsave(here::here('figs', 'moran_bad.png'), width = 7, height = 4)
 ```
 
 ```{r}
-ggplot(lag_mod_tib, aes(resids, neighborhood)) + 
+resids_bad <- ggplot(lag_mod_tib, aes(resids, neighborhood)) + 
   geom_point() + 
   geom_smooth(method = lm) + 
   labs(x = 'Residuals', 
        y = 'Spatial Neighborhood') + 
   geom_text(aes(x=0.5, y=0.38, label = paste0('r', common::supsc("2"), ' = ', summary(lag_lm)$adj.r.squared)),
            color="darkred", 
-           size=4.5, fontface="italic") +
+           size=2, fontface="italic") +
   geom_text(aes(x=0.5, y=0.35, label = paste0('p = ', summary(lag_lm)$coefficients[2,4])),
            color="darkred", 
-           size=4.5, fontface="italic") +
+           size=2, fontface="italic") +
   theme_minimal()
 
 ggsave(here::here('figs', 'resids_bad.png'), width = 7, height = 4)
@@ -276,7 +277,7 @@ resid_mc <- moran.mc(lag_mod_tib$error_resid, bee_lw, nsim = 999)
 ```
 
 ```{r}
-tibble(moran = resid_mc$res) %>% 
+moran_good <- tibble(moran = resid_mc$res) %>% 
   ggplot(aes(x = moran)) + 
   geom_histogram() + 
   geom_vline(xintercept = err_moran$I, 
@@ -300,17 +301,17 @@ err_res_lm <- lm(lag_mod_tib$neighborhood_err ~ lag_mod_tib$error_resid)
 ```
 
 ```{r}
-ggplot(lag_mod_tib, aes(error_resid, neighborhood_err)) + 
+resids_good <- ggplot(lag_mod_tib, aes(error_resid, neighborhood_err)) + 
   geom_point() + 
   geom_smooth(method = lm) + 
   labs(x = 'Residuals', 
        y = 'Spatial Neighborhood') + 
   geom_text(aes(x=0.5, y=0.3, label = paste0('r', common::supsc("2"), ' = ', summary(err_res_lm)$adj.r.squared)),
            color="turquoise3", 
-           size=4.5, fontface="italic") +
+           size=2, fontface="italic") +
   geom_text(aes(x=0.5, y=0.27, label = paste0('p = ', summary(err_res_lm)$coefficients[2,4])),
            color="turquoise3", 
-           size=4.5, fontface="italic") +
+           size=2, fontface="italic") +
   theme_minimal()
 
 ggsave(here::here('figs', 'resids_good.png'), width = 7, height = 4)
@@ -319,7 +320,7 @@ ggsave(here::here('figs', 'resids_good.png'), width = 7, height = 4)
 by using an error model, we resolve the autospatial correlation
 ```{r}
 # plot error model variables
-ggplot(biodiversity, aes(x = kg_prd_used, y = sp_richness)) + 
+final_fig <- ggplot(biodiversity, aes(x = kg_prd_used, y = sp_richness)) + 
   geom_abline(intercept = coef(bio_err)[2], 
               slope = coef(bio_err)[3], 
               linewidth = 2, 
@@ -342,6 +343,16 @@ ggplot(biodiversity, aes(x = kg_prd_used, y = sp_richness)) +
   theme_minimal()
 
 ggsave(here::here('figs', 'final_fig.png'), width = 6, height = 4)
+```
+
+save patchwork
+```{r}
+(moran_bad + resids_bad) / (moran_good + resids_good) + 
+  plot_annotation(
+  title = "Effect of Error Model on Residuals of Biodiversity Against Pesticide", 
+    theme = theme(plot.title = element_text(hjust = 0.5)))
+
+ggsave(here::here('figs', 'simple_patchwork.png'), width = 7, height = 4)
 ```
 
 
@@ -413,7 +424,7 @@ summary(lm(sp_richness ~ kg_prd_used + land_use, biodiversity))
 
 getting new lm
 ```{r}
-# new lm w land use
+# new lm w land cover
 land_use_lm <- summary(lm(sp_richness ~ kg_prd_used + land_use, biodiversity))
 
 # attaching resids of new lm to df
@@ -452,7 +463,7 @@ tibble(moran = bee_mc$res) %>%
        y = 'Frequency') + 
   theme_minimal()
 
-#ggsave(here::here('figs', 'moran_bad.png'), width = 7, height = 4)
+ggsave(here::here('figs', 'moran_land_bad.png'), width = 7, height = 4)
 ```
 
 making the plots
@@ -470,7 +481,7 @@ ggplot(lag_mod_tib, aes(resids, neighborhood)) +
            size=4.5, fontface="italic") +
   theme_minimal()
 
-#ggsave(here::here('figs', 'resids_bad.png'), width = 7, height = 4)
+ggsave(here::here('figs', 'resids_land_bad.png'), width = 7, height = 4)
 ```
 conclusion? maybe some spatial coorelation. we'll apply an error model for good measure.
 
@@ -511,7 +522,7 @@ tibble(moran = resid_mc$res) %>%
        y = 'Frequency') + 
   theme_minimal()
 
-ggsave(here::here('figs', 'moran_good.png'), width = 7, height = 4)
+ggsave(here::here('figs', 'moran_land_good.png'), width = 7, height = 4)
 ```
 
 ```{r}
@@ -539,7 +550,7 @@ ggplot(lag_mod_tib, aes(error_resid_land, neighborhood_err_land)) +
            size=4.5, fontface="italic") +
   theme_minimal()
 
-ggsave(here::here('figs', 'resids_good.png'), width = 7, height = 4)
+ggsave(here::here('figs', 'resids_land_good.png'), width = 7, height = 4)
 ```
 
 autospatial correlation resolved
@@ -554,10 +565,6 @@ expand_grid(sp_richness = seq(min(biodiversity$sp_richness), max(biodiversity$sp
                    type = 'response')) %>%
 ggplot() + 
   geom_line(aes(x = kg_prd_used, y = p, color = as.factor(land_use))) + 
-#  geom_abline(intercept = coef(bio_land_err)[2], 
-#              slope = coef(bio_land_err)[3], 
-#              linewidth = 2, 
-#              color = 'darkred') + 
   geom_point(data = biodiversity, mapping = aes(x = kg_prd_used, y = sp_richness)) +
   labs(x = 'Product Used (kg)',
        y = 'Species Richness Normalized by Sample Size',
@@ -590,6 +597,92 @@ ggsave(here::here('figs', 'final_land_fig.png'), width = 6, height = 4)
 
 
 
+
+
+
+
+
+
+
+There may not be a significant correlation between biodiversity and pesticide use, but we can do a confidence test anyway
+
+1. Define hypothesis
+HO = there is no significant effect of habitat on the relationship between biodiversity and pesticide use
+Ha = there is a significant effect
+
+2. get t stat
+difference in y intercept between habitat and non-habitat
+
+```{r}
+# separate land use values
+biodiversity_hab <- biodiversity %>% 
+  filter(land_use == 1)
+biodiversity_non_hab <- biodiversity %>% 
+  filter(land_use == 0)
+
+# make error models to get y ints from
+hab_error <- lm(sp_richness ~ kg_prd_used, biodiversity_hab)
+
+non_hab_error <- lm(sp_richness ~ kg_prd_used, biodiversity_non_hab)
+
+# get y intercepts
+t_st_hab <- coef(summary(hab_error))[1,1]
+t_st_non_hab <- coef(summary(non_hab_error))[1,1]
+
+# get difference
+diff <- t_st_hab - t_st_non_hab
+```
+
+3. Get random dist and plot with t stat
+```{r, warning=FALSE}
+
+biodiversity_null <- replicate(1000, {
+
+# shuffle habitat in biodiversity
+biodiversity_shuffle <- biodiversity %>% 
+  mutate(land_use = rbinom(nrow(biodiversity), 1, 0.5))
+
+# separate land use values
+biodiversity_hab <- biodiversity_shuffle %>% 
+  filter(land_use == 1)
+biodiversity_non_hab <- biodiversity_shuffle %>% 
+  filter(land_use == 0)
+
+# make error models to get y ints from
+hab_error <- lm(sp_richness ~ kg_prd_used, biodiversity_hab)
+
+non_hab_error <- lm(sp_richness ~ kg_prd_used, biodiversity_non_hab)
+
+# get y intercepts
+t_st_hab <- coef(summary(hab_error))[1,1]
+t_st_non_hab <- coef(summary(non_hab_error))[1,1]
+
+# get difference
+diff <- t_st_hab - t_st_non_hab
+
+})
+```
+
+4. Plot null dist with t stat
+```{r}
+ggplot(tibble(biodiversity_null), aes(x = biodiversity_null)) + 
+  geom_histogram(bins = 20,
+                 color = 'black',
+                 fill = 'yellow',
+                 lwd = 2) + 
+  geom_vline(xintercept = diff,
+             color = 'firebrick', 
+             lwd = 2) + 
+  labs(x = 'Differences in y-intercepts',
+       y = 'Count')
+
+ggsave(here::here('figs', 'hypothesis_test.png'), width = 6, height = 4)
+```
+
+5. get p value
+```{r}
+p_value <- sum(biodiversity_null > diff) /length(biodiversity_null)
+```
 
 
 
@@ -652,28 +745,16 @@ return(x)
 
 ```
 
-
+more experimentation
 ```{r}
-ggplot(null_dist, aes(x = null_pest, y = null_rich)) + 
-  geom_point() + 
-  geom_smooth(method = lm)
-```
 
-There may not be a significant correlation between biodiversity and pesticide use, but we can do a confidence test anyway
 
-1. Define hypothesis
-HO = there is no significant coorelation between biodiversity and pesticide use
-Ha = there is a significant coorelation
+expand_grid(sp_richness = seq(min(biodiversity$sp_richness), max(biodiversity$sp_richness), length.out = 100),
+            kg_prd_used = seq(min(biodiversity$kg_prd_used), max(biodiversity$kg_prd_used), length.out = 100),
+            land_use = rbinom(100, 1, 0.5))
 
-2. get t stat
-amount of variance between counties
 
-```{r}
-t_st <- summary(bio_err)$Coef[2,3]
-```
 
-3. Get random dist and plot with t stat
-```{r}
 null_dist <- null_dist_maker()
 null_lm <- errorsarlm(null_rich ~ null_pest, 
             data = null,
