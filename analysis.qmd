@@ -258,8 +258,11 @@ summary(bio_err)
 ```
 
 ```{r}
+
 # add model and model residuals column to lag tibble
+if(exists('error_mod') == FALSE){
 lag_mod_tib <- lag_mod_tib %>% add_column(error_mod = fitted(bio_err), error_resid = resid(bio_err))
+}
 
 # running a lag model with the error model
 lag_mod_err <- lag.listw(bee_lw, lag_mod_tib$error_resid)
@@ -395,27 +398,196 @@ biodiversity <- biodiversity %>% st_join(select(.data = hab_frag_ca, fragmntndx)
 }
 ```
 
-```{r}
-tm_shape(biodiversity) + 
-  tm_polygons(col = 'habitat_frag')
-```
-
-```{r}
-# new lm with all variables
-pop_n_frag_lm <- lm(sp_richness ~ kg_prd_used + pop_density + habitat_frag + land_use, biodiversity)
-
-summary(pop_n_frag_lm)
-```
-
 
 seeing which variables correlate
 ```{r}
+summary(lm(sp_richness ~ habitat_frag, biodiversity))
+summary(lm(sp_richness ~ pop_density, biodiversity))
+summary(lm(sp_richness ~ land_use, biodiversity))
+
 summary(lm(sp_richness ~ kg_prd_used + habitat_frag, biodiversity))
 summary(lm(sp_richness ~ kg_prd_used + pop_density, biodiversity))
 summary(lm(sp_richness ~ kg_prd_used + land_use, biodiversity))
 
-summary(lm(habitat_frag ~ land_use, biodiversity))
 ```
+
+getting new lm
+```{r}
+# new lm w land use
+land_use_lm <- summary(lm(sp_richness ~ kg_prd_used + land_use, biodiversity))
+
+# attaching resids of new lm to df
+biodiversity <- biodiversity %>% mutate(sp_pest_land_resid = resid(land_use_lm))
+```
+
+neighborhood weighting from previous error model is alread suitable for this one so no need to do it again
+```{r}
+# get moran I again
+bee_resid_moran <- moran(biodiversity$sp_pest_land_resid, 
+                         listw = bee_lw, 
+                         n = length(bee_nb), 
+                         S0 = Szero(bee_lw))
+
+# run 999 simulations
+bee_mc <- moran.mc(biodiversity$sp_pest_land_resid, bee_lw, nsim = 999)
+
+# running a lag model
+lag_mod <- lag.listw(bee_lw, biodiversity$sp_pest_land_resid)
+
+# making lag model table
+lag_mod_tib <- tibble(resids = biodiversity$sp_pest_land_resid, neighborhood = lag_mod)
+
+# lag mod lm
+lag_lm <- lm(neighborhood ~ resids, data = lag_mod_tib)
+```
+
+```{r}
+tibble(moran = bee_mc$res) %>% 
+  ggplot(aes(x = moran)) + 
+  geom_freqpoly(lwd = 1.5) + 
+  geom_vline(xintercept = bee_resid_moran$I, 
+             color = 'red', 
+             linewidth = 2.5) + 
+  labs(x = "Moran's I",
+       y = 'Frequency') + 
+  theme_minimal()
+
+#ggsave(here::here('figs', 'moran_bad.png'), width = 7, height = 4)
+```
+
+making the plots
+```{r}
+ggplot(lag_mod_tib, aes(resids, neighborhood)) + 
+  geom_point() + 
+  geom_smooth(method = lm) + 
+  labs(x = 'Residuals', 
+       y = 'Spatial Neighborhood') + 
+  geom_text(aes(x=0.5, y=0.38, label = paste0('r', common::supsc("2"), ' = ', summary(lag_lm)$adj.r.squared)),
+           color="darkred", 
+           size=4.5, fontface="italic") +
+  geom_text(aes(x=0.5, y=0.35, label = paste0('p = ', summary(lag_lm)$coefficients[2,4])),
+           color="darkred", 
+           size=4.5, fontface="italic") +
+  theme_minimal()
+
+#ggsave(here::here('figs', 'resids_bad.png'), width = 7, height = 4)
+```
+conclusion? maybe some spatial coorelation. we'll apply an error model for good measure.
+
+```{r}
+bio_land_err <- errorsarlm(sp_richness ~ kg_prd_used + land_use, 
+                data = biodiversity,
+                listw = bee_lw,
+                na.action = na.exclude, 
+                zero.policy = TRUE)
+
+summary(bio_land_err)
+```
+
+```{r}
+# add model and model residuals column to lag tibble
+if(exists('error_mod_land') == FALSE){
+lag_mod_tib <- lag_mod_tib %>% add_column(error_mod_land = fitted(bio_land_err), error_resid_land = resid(bio_land_err))
+}
+
+# running a lag model with the error model
+lag_mod_err <- lag.listw(bee_lw, lag_mod_tib$error_resid_land)
+
+# get moran I for error model
+err_moran <- moran(lag_mod_tib$error_resid_land, listw = bee_lw, n = length(bee_nb), S0 = Szero(bee_lw))
+
+# run simulation with error model
+resid_mc <- moran.mc(lag_mod_tib$error_resid_land, bee_lw, nsim = 999)
+```
+
+```{r}
+tibble(moran = resid_mc$res) %>% 
+  ggplot(aes(x = moran)) + 
+  geom_histogram() + 
+  geom_vline(xintercept = err_moran$I, 
+             color = 'green3', 
+             linewidth = 2.5) + 
+  labs(x = "Moran's I",
+       y = 'Frequency') + 
+  theme_minimal()
+
+ggsave(here::here('figs', 'moran_good.png'), width = 7, height = 4)
+```
+
+```{r}
+# add lag for error to tibble
+if ('neighborhood_err_land' %in% names(lag_mod_tib) == FALSE){
+lag_mod_tib <- lag_mod_tib %>% add_column(neighborhood_err_land = lag_mod_err)
+}
+
+# run an lm to get p for errors neighborhood ~ resid
+err_res_lm <- lm(lag_mod_tib$neighborhood_err_land ~ lag_mod_tib$error_resid_land)
+```
+
+and no more coorelated residuals
+```{r}
+ggplot(lag_mod_tib, aes(error_resid_land, neighborhood_err_land)) + 
+  geom_point() + 
+  geom_smooth(method = lm) + 
+  labs(x = 'Residuals', 
+       y = 'Spatial Neighborhood') + 
+  geom_text(aes(x=0.5, y=0.3, label = paste0('r', common::supsc("2"), ' = ', summary(err_res_lm)$adj.r.squared)),
+           color="turquoise3", 
+           size=4.5, fontface="italic") +
+  geom_text(aes(x=0.5, y=0.27, label = paste0('p = ', summary(err_res_lm)$coefficients[2,4])),
+           color="turquoise3", 
+           size=4.5, fontface="italic") +
+  theme_minimal()
+
+ggsave(here::here('figs', 'resids_good.png'), width = 7, height = 4)
+```
+
+autospatial correlation resolved
+```{r}
+
+# plot error model variables
+expand_grid(sp_richness = seq(min(biodiversity$sp_richness), max(biodiversity$sp_richness), length.out = 100),
+            kg_prd_used = seq(min(biodiversity$kg_prd_used), max(biodiversity$kg_prd_used), length.out = 100),
+            land_use = c(0,1)) %>% 
+  mutate(p = predict(bio_land_err,
+                   newdata = .,
+                   type = 'response')) %>%
+ggplot() + 
+  geom_line(aes(x = kg_prd_used, y = p, color = as.factor(land_use))) + 
+#  geom_abline(intercept = coef(bio_land_err)[2], 
+#              slope = coef(bio_land_err)[3], 
+#              linewidth = 2, 
+#              color = 'darkred') + 
+  geom_point(data = biodiversity, mapping = aes(x = kg_prd_used, y = sp_richness)) +
+  labs(x = 'Product Used (kg)',
+       y = 'Species Richness Normalized by Sample Size',
+       title = 'Effect of Pesticide Application on Anthophila Richness', 
+       color = 'Land Use') + 
+  geom_text(aes(x=1.3e+7, y=0.75, 
+                label = paste0('pseudo-r', common::supsc("2"), 
+                               ' = ', 
+                               '???')),
+           color="darkred", 
+           size=4.5, fontface="italic") +
+  geom_text(aes(x=1.3e+7, y=0.7, 
+                label = paste0('Pesticide Use (p) = ', 
+                               summary(bio_land_err)$Coef[2,4])),
+           color="darkred", 
+           size=4.5, fontface="italic") +
+  geom_text(aes(x=1.3e+7, y=0.65, 
+                label = paste0('Land Cover (p) = ', 
+                               summary(bio_land_err)$Coef[3,4])),
+           color="darkred", 
+           size=4.5, fontface="italic") + 
+  scale_color_manual(labels = c('Non-Habitat', 'Habitat'), values = viridisLite::viridis(2, end = 0.8)) + 
+  theme_minimal() + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggsave(here::here('figs', 'final_land_fig.png'), width = 6, height = 4)
+```
+
+
+
 
 
 
